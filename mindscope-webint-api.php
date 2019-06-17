@@ -43,6 +43,7 @@ $mindscope_api_db_version = "1.2";
 function update_mindscope_api_data_func()
 {
 	$delete_all_posts = $_GET['delete_all'];
+	$force_update = $_GET['force_update'];
 	
 	if ($delete_all_posts) {
 		delete_all_mindscope_job_posts();
@@ -65,14 +66,14 @@ function update_mindscope_api_data_func()
 		$saved_update_datetime = get_option("mindscope_api_job_page_update_datetime");
 		
 		$update_datetime = strtotime($saved_update_datetime);
-		$update_datetime_add = $update_datetime+(60);
+		$update_datetime_add = $update_datetime+(60*1440);
 		$update_datetime_final = date("Y-m-d H:i:s", $update_datetime_add);
 		$current_datetime_string = date("Y-m-d H:i:s");
 
 		$date_expire = new DateTime($update_datetime_final);
 		$date_now = new DateTime($current_datetime_string);
 		
-		if (get_option('mindscope_api_job_create_running') != 'true' && ($date_now > $date_expire))
+		if ((get_option('mindscope_api_job_create_running') != 'true' && ($date_now > $date_expire)) || ($force_update))
 		{
 			ini_set('max_execution_time', 600);
 			ini_set('default_socket_timeout', 600);
@@ -155,13 +156,18 @@ function reset_cache()
 
 function get_google_job_post_javascript($joborder)
 {
+	$filter = json_encode(array('ShowGoogleJobOrder'=>'Yes', 'filter'=>array('JobOrderID' => $joborder->jobOrderId)), JSON_FORCE_OBJECT);
+	$job_result = cura_search_joborder($filter);
+	
+	$job_details = $job_result->jobOrder[0];
+	
 	$company_name = get_option('mindscope_webint_api_company_name');
 	$website_url = get_option('mindscope_webint_api_website_url');
 	$logo_url = get_option('mindscope_webint_api_logo_url');
 	
-	$job_description = strip_tags($joborder->jobFunction, "<br><p><ul><li><h1><h2><h3><h4><h5><strong><em><b>");
+	$job_description = strip_tags($job_details->jobFunction, "<br><p><ul><li><h1><h2><h3><h4><h5><strong><em><b>");
 	
-	$web_pub_date = date_parse($value->webPublicationDate);
+	$web_pub_date = date_parse($job_details->webPublicationDate);
 	$web_pub_date_short = "";
 	if ($web_pub_date["error_count"] == 0)
 	{
@@ -175,12 +181,12 @@ function get_google_job_post_javascript($joborder)
 	$job_post_json = array(
 		"@context" => "https://schema.org/",
 		"@type" => "JobPosting",
-		"title" => $joborder->position,
+		"title" => $job_details->position,
 		"description" => $job_description,
 		"identifier" => array(
 					"@type" => "PropertyValue",
 					"name" => $company_name,
-					"value" => strval($joborder->jobOrderId)
+					"value" => strval($job_details->jobOrderId)
 				),
 		"datePosted" => $web_pub_date_short,
 		"hiringOrganization" => array(
@@ -193,8 +199,11 @@ function get_google_job_post_javascript($joborder)
 					"@type" => "Place",
 					"address" => array(
 							"@type" => "PostalAddress",
-							"addressLocality" => $joborder->city,
-							"addressRegion" => $joborder->province
+							"streetAddress" => $job_details->street,
+							"addressLocality" => $job_details->city,
+							"addressRegion" => $job_details->province,
+							"postalCode" => $job_details->postalZip,
+							"addressCountry" => $job_details->country
 					)
 				)
 	);
@@ -974,6 +983,7 @@ function mindscope_webint_api_form_handle_save()
 			  'lastName'=>$lastname,
 			  'middleName'=>$middlename,
 			  'emailAddress'=>$email,
+			  'marketingSourceName'=>'Website',
 			  'sendConfirmationEmail'=>'Yes',
 			  'address'=>(array(array('address'=>$address1, 'address2'=>$address2, 'city'=>$city, 'provinceId'=>$provincestate, 'PostalCode'=>$zippostal, 'default'=>'Yes'))),
 			  'phone'=>(array(array('value'=>$phone, 'default'=>'Yes'))),
