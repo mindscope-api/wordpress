@@ -38,7 +38,7 @@ add_action( 'wp_ajax_nopriv_mindscope_save_page_number', 'mindscope_ajax_save_pa
 
 
 global $mindscope_api_db_version;
-$mindscope_api_db_version = "1.2";
+$mindscope_api_db_version = "1.6";
 
 function update_mindscope_api_data_func()
 {
@@ -150,16 +150,14 @@ function reset_cache()
 		unlink($job_list_cache_dir);
 	  }
 	}
-	
-	//test_page_creation_function();
 }
 
-function get_google_job_post_javascript($joborder)
+function get_google_job_post_javascript($job_details)
 {
-	$filter = json_encode(array('ShowGoogleJobOrder'=>'Yes', 'filter'=>array('JobOrderID' => $joborder->jobOrderId)), JSON_FORCE_OBJECT);
-	$job_result = cura_search_joborder($filter);
+	// $filter = json_encode(array('ShowGoogleJobOrder'=>'Yes', 'filter'=>array('JobOrderID' => $joborder->jobOrderId)), JSON_FORCE_OBJECT);
+	// $job_result = cura_search_joborder($filter);
 	
-	$job_details = $job_result->jobOrder[0];
+	// $job_details = $job_result->jobOrder[0];
 	
 	$company_name = get_option('mindscope_webint_api_company_name');
 	$website_url = get_option('mindscope_webint_api_website_url');
@@ -219,6 +217,8 @@ function static_job_post_func ( $args )
 {
 	try
 	{
+		global $wpdb;
+		
 		load_script_jquery();
 		load_script_bootstrap();
 		load_style_mindscope_webint();
@@ -243,7 +243,33 @@ function static_job_post_func ( $args )
 			$display_requirements = "style='display: none;'";
 		}
 		
-		$google_javascript = get_google_job_post_javascript($job_details->jobOrder[0]);
+		$google_js_filter = json_encode(array('ShowGoogleJobOrder'=>'Yes', 'filter'=>array('JobOrderID' => $the_id)), JSON_FORCE_OBJECT);
+		$job_result = cura_search_joborder($google_js_filter);
+		
+		$job_google_details = $job_result->jobOrder[0];
+		$google_javascript = get_google_job_post_javascript($job_google_details);
+		
+		$job_page = $wpdb->get_row("SELECT googlejobjs FROM {$wpdb->prefix}mindscope_api_jobpages WHERE jobid = {$the_id}");
+		$google_job_js_current = $job_page->googlejobjs;
+		if (is_null($google_job_js_current)) {
+			$google_job_js_current = "";
+		}
+		
+		if (!hash_equals($google_job_js_current, $google_javascript)) {
+			$result = $wpdb->update( 
+				$wpdb->prefix . 'mindscope_api_jobpages', 
+				array( 'updatedata' => 1,
+					   'googlejobjs' => $google_javascript,
+					   'updatedatetime' => current_time( 'mysql' )
+					 ),
+				array( 'jobid' => $the_id ), 
+				array( '%d',
+					   '%s',
+					   '%s'
+					 ), 
+				array( '%d' ) 
+			);
+		}
 
 		$return_html = "
 		{$google_javascript}
@@ -359,6 +385,7 @@ function add_new_job_page($joborder, $post_id, $job_desc_page) {
 	if ($added_page_id != 0) {
 		
 		$status_code = call_google_index_api("URL_UPDATED", get_permalink($added_page_id));
+		$google_job_js = get_google_job_post_javascript($joborder);
 		
 		if (!is_numeric($status_code)) {
 			$status_code = 0;
@@ -372,7 +399,8 @@ function add_new_job_page($joborder, $post_id, $job_desc_page) {
 				'createdatetime' => current_time( 'mysql' ),
 				'updatedatetime' => current_time( 'mysql' ),
 				'postid' => $added_page_id,
-				'indexapiresponsecode' => $status_code
+				'indexapiresponsecode' => $status_code,
+				'googlejobjs' => $google_job_js
 			),
 			array(
 				'%d',
@@ -380,7 +408,8 @@ function add_new_job_page($joborder, $post_id, $job_desc_page) {
 				'%s',
 				'%s',
 				'%d',
-				'%d'
+				'%d',
+				'%s'
 			)
 		);
 		
@@ -418,8 +447,10 @@ function add_new_job_page($joborder, $post_id, $job_desc_page) {
 	}
 }
 
-function update_existing_job_page($joborder, $post_id)
+function update_existing_job_page($joborder, $post_id, $update_data)
 {
+	global $wpdb;
+	
 	$brief_description = strip_tags(($joborder->briefDescription));
 	if (strlen($brief_description) > 120)
 	{
@@ -428,6 +459,27 @@ function update_existing_job_page($joborder, $post_id)
 	
 	update_post_meta( $post_id, '_yoast_wpseo_title', $joborder->position );
 	update_post_meta( $post_id, '_yoast_wpseo_metadesc', $brief_description );
+	
+	if ($update_data == 1) {
+		$job_page = get_post($post_id);
+		wp_update_post($job_page);
+		
+		$status_code = call_google_index_api("URL_UPDATED", get_permalink($post_id));
+		
+		$result = $wpdb->update( 
+				$wpdb->prefix . 'mindscope_api_jobpages', 
+				array( 'updatedata' => 0,
+					   'updatedatetime' => current_time( 'mysql' ),
+					   'indexapiresponsecode' => $status_code
+					 ),
+				array( 'jobid' => $joborder->jobOrderId ), 
+				array( '%d',
+					   '%s',
+					   '%d'
+					 ), 
+				array( '%d' ) 
+			);
+	}
 }
 
 function delete_existing_job_page($post_id, $url)
@@ -525,11 +577,11 @@ function update_job_pages() {
 	{
 		if ($value->position != "")
 		{
-			$job_page = $wpdb->get_row("SELECT postid FROM {$wpdb->prefix}mindscope_api_jobpages WHERE jobid = {$value->jobOrderId}");
+			$job_page = $wpdb->get_row("SELECT postid, ifnull(updatedata, 0) as updatedata FROM {$wpdb->prefix}mindscope_api_jobpages WHERE jobid = {$value->jobOrderId}");
 			//console_log($job_exists);
 			//if (0 == 0 ) {
 			if ($job_page->postid > 0 ) {
-				update_existing_job_page($value, $job_page->postid);
+				update_existing_job_page($value, $job_page->postid, $job_page->updatedata);
 			}
 		}
 	}
@@ -584,6 +636,8 @@ function mindscope_webint_api_install() {
 			createdatetime datetime DEFAULT '0000-00-00 00:00:00' NOT NULL,
 			updatedatetime datetime NULL,
 			indexapiresponsecode int NULL,
+			googlejobjs text NULL,
+			updatedata tinyint NULL,
 			PRIMARY KEY  (id)
 		) $charset_collate;";
 		
